@@ -177,7 +177,7 @@ The OpenSpec changes that grow the Octopus into a theme-park tycoon (listed in
 `docs/roadmap.md`, goal in `docs/vision.md`) are for an AI-workshop **demo**, not a
 production release. For those changes, `docs/demo-scope.md` decides what may be
 relaxed (benchmarks, the 80 % coverage floor on new game modules, extra tolerance tiers,
-deep currency checks, optional a11y specs) and what may not (green build per commit,
+deep currency checks, optional a11y specs, rare edge cases, security hardening) and what may not (green build per commit,
 the existing ride tests, no destructive actions, original names and art, seeded
 determinism). Deferring is allowed, silent dropping is not: mark the task
 `(deferred: demo scope)` and list it in the PR description. Everything else in this file

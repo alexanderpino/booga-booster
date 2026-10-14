@@ -36,6 +36,15 @@ default; MVP tiers are not.
 - **Documentation derivations, authoring guides, validation scripts, visual regression,
   git-lfs, diagnostics endpoints, extra dashboards.** Optional unless the demo moment
   needs them.
+- **Edge cases.** Code must be neat and readable and handle the normal flow and the
+  obvious failures (bad input from the UI, a missing file, an empty park). It does not
+  need to cover every rare combination, overflow, race or recovery path. Where a spec
+  lists an exotic scenario, implement it only if it is cheap or the demo can hit it.
+- **Security hardening.** No threat modelling, authentication or authorisation work, rate
+  limiting, input-size caps, tamper-proof saves or checksum/signature schemes beyond what
+  already exists. The demo runs on a trusted machine. Tasks that exist only for
+  hardening (for example save-file integrity, hostile-input validation, replay-attack
+  guards) may be deferred.
 - **Plan size.** Each change may stop at the first task group that delivers its demo
   moment, then continue only if time allows.
 
@@ -44,7 +53,11 @@ default; MVP tiers are not.
 - **A green build at every commit** and the existing ride tests keep passing. The
   working Octopus is the foundation of the demo; do not break it.
 - **No destructive actions without confirmation,** no secrets in files or logs, no
-  merging: the agent opens the pull request and never merges.
+  merging: the agent opens the pull request and never merges. Relaxed security above
+  does not extend to these: never commit credentials, even for a demo.
+- **Clean code.** Short-cuts are in coverage of rare cases, not in readability: no dead
+  code, no leftover debug output, honest names, and the module and folder conventions of
+  `CLAUDE.md` still hold.
 - **Legal and originality:** original names and art, our own numbers, no copied code or
   assets from RollerCoaster Tycoon or OpenRCT2.
 - **Reproducible demo:** seeded randomness and the fixed simulation step stay, because a

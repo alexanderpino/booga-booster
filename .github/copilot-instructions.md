@@ -136,7 +136,7 @@ doc before changing anything in `DigitalTwin/Domain`.
 The OpenSpec changes in `docs/roadmap.md` (goal: `docs/vision.md`) are for a workshop
 **demo**, not a production release. `docs/demo-scope.md` says what may be relaxed
 (benchmarks, the 80 % coverage floor on new game modules, extra tolerance tiers, deep
-currency checks) and what may not (green build per commit, existing ride tests, no
+currency checks, rare edge cases, security hardening) and what may not (green build per commit, existing ride tests, no
 destructive actions, original names and art, seeded determinism). Mark skipped tasks
 `(deferred: demo scope)` and list them in the PR. On a larger conflict, stop and ask.
 
