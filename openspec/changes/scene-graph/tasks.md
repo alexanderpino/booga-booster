@@ -1,0 +1,90 @@
+Conventions for every task below: depends on `ecs-foundation` being applied (verify first, task 1.1). C# work starts by consulting the `4dotnet-csharp-style-guide` MCP server (`search_documents` for the topic) and follows it; data members are properties, never public fields; every behaviour task is test-first (write the failing xUnit v3 test named after the rule, see it fail, implement, see it pass); no FluentAssertions; floating-point asserts use an explicit tolerance helper `AssertEx.Near(expected, actual, tolerance)` except where the spec says bitwise; no magic numbers (constants in `Simulation/SceneGraph/SceneGraphParameters.cs`, rationale in `docs/simulation/02-scene-graph.md`). Backend paths are relative to `src/`; module project is `Simulation/FourDotnet.BoogaBooster.Simulation` ("module"), tests are `Tests/FourDotnet.BoogaBooster.Simulation.Tests` ("tests", folder `SceneGraph/`). Run `dotnet test Tests/FourDotnet.BoogaBooster.Simulation.Tests` from `src/` after every group.
+
+## 1. Preflight and shared fixtures
+
+- [ ] 1.1 Verify `ecs-foundation` is merged into the base branch (`git log --oneline -20` shows it; `dotnet build BoogaBooster.slnx` is green). If not, stop and report: this change cannot start. Create the worktree and branch `feature/scene-graph` via the `git-change-workflow` skill.
+- [ ] 1.2 Read the as-built ecs-foundation names (`IEntityLifecycleObserver`, `ISimulationSystem`, `SystemAccess`, `ComponentRegistry.Register`, `WorldSerializer`, `RandomOperationSequence`) and list any spelling difference from `design.md` "Dependencies and contracts" in `docs/simulation/02-scene-graph.md` (stub). Verify: stub exists with the mapping table.
+- [ ] 1.3 Add `SceneGraph/SceneGraphParameters.cs`: `MaxNodes = 262_144`, `MaxDepth = 64`, `MaxNameLength = 31`, `NameBytes = 32`, `QuaternionNormTolerance = 1e-9`, `TwistEpsilon = 1e-12`, `PoseStride = 8`, each with an XML-doc rationale. Test first: `SceneGraphParametersTests.PoseStride_matches_transform_field_count`. Verify: green.
+- [ ] 1.4 Add test helpers in tests `SceneGraph/Support/`: `AssertEx.Near` for vectors, quaternions and transforms; `SceneFixtures` exposing the numeric fixtures of the specs (mill yaw 90 degrees, arm pitch 30 degrees, hub local (6, 0, 0) gives world (0, 3, -5.196152422706632)) with a comment pointing to the spec scenario; `NaiveSceneReference` (recursive composition from roots, written independently of the production code). Test first for the helpers themselves (tolerance failure produces a readable message).
+
+## 2. Math types
+
+- [ ] 2.1 Test first (`Vector3DTests`): add/subtract/scale, dot, cross, length; `readonly record struct Vector3D(double X, double Y, double Z)` equality; no NaN-equality surprises (documented). Implement `SceneGraph/Math/Vector3D.cs`.
+- [ ] 2.2 Test first (`QuaternionDTests`): `FromAxisAngle` for +Y 90 degrees rotates (6, 0, 0) to (0, 0, -6) within 1e-12; Hamilton product order (`qY * qZ` applies Z first); normalise; conjugate; rotate vector; unit length after composing 1 000 random rotations normalised each step. Implement `SceneGraph/Math/QuaternionD.cs`.
+- [ ] 2.3 Test first (`TwistTests`): `TwistY` of `qY(phi) * qZ(theta)` equals `qY(phi)` for phi in {0, 30, 90, 179, -120} degrees and theta in {0, 15, 30, 60, 89} degrees within 1e-12; `TwistY` of (1, 0, 0, 0) is identity; `TwistY` of identity is identity. Implement `QuaternionD.TwistY()`.
+- [ ] 2.4 Test first (`Transform3DTests`): composition cases from the spec (translation, scale 2 with child scale 3, yaw 90 degrees, pitch 30 degrees, combined yaw+pitch gives (0, 3, -5.196152422706632), large offset 1e7 + 0.001 precision); validation (`IsValid`: NaN, infinity, scale <= 0, quaternion length off by more than 1e-9). Implement `SceneGraph/Math/Transform3D.cs` with `Compose(parentWorld, local, OrientationMode)` (`Inherit`, `UprightYaw`) and `OrientationMode`.
+- [ ] 2.5 Test first (`UprightComposeTests`, the four spec scenarios of `scene-upright-orientation`: up axis stays (0, 1, 0) within 1e-12, own spin 45 degrees gives 135 degrees yaw, reach 6 cos(pitch) and height 6 sin(pitch) for pitch 0/15/30/45/60 degrees, undefined twist). Verify against the implementation from 2.4; fix until green.
+
+## 3. Hierarchy storage
+
+- [ ] 3.1 Test first (`NodeNameTests`): valid/invalid names from the spec (empty, leading digit, `/`, space, 32 characters), path join and split. Implement `SceneGraph/NodeName.cs` (validation) and `NodePath.cs`.
+- [ ] 3.2 Test first (`NodeIdTests`): `NodeId.None == 0`; ids allocated 1, 2, 3; counter survives destroy (id 4 after destroying 2); counter restorable (`SetNextId`) for rebuild. Implement `SceneGraph/NodeId.cs` and `NodeIdAllocator`.
+- [ ] 3.3 Test first (`SceneGraphCreateTests`): create roots and children; duplicate sibling name rejected and graph unchanged; limit rejections (`MaxDepth` chain of 65, `MaxNodes` using an option override of 8); structure version increments; rejection counter reasons. Implement `SceneGraph/SceneGraph.cs` (slot table, `Dictionary<long,int>` lookup, sibling sequence numbers, `CreateNode`).
+- [ ] 3.4 Test first (`SceneGraphOrderTests`): level order scenario (A, B, A1, B1, A11 with level starts 0, 2, 4); order dirty after structural change and rebuilt by `Update`; sibling order stable; reparent appends last among new siblings. Implement the stable BFS rebuild and `LevelStarts`.
+- [ ] 3.5 Test first (`SceneGraphReparentTests`): under itself, under a descendant (rejected, unchanged), to none (becomes root), valid move; local transform unchanged by reparenting. Implement `Reparent` with the ancestor walk bounded by `MaxDepth`.
+- [ ] 3.6 Test first (`SceneGraphDestroyTests`): subtree destroy removes ids 2 and 3, node count drops by two, other ids and order survive, queries return false, next id is 4. Implement `Destroy` and dense compaction.
+- [ ] 3.7 Test first (`SceneGraphIterationScopeTests`): immediate create/reparent/destroy/rename throw `InvalidOperationException` while the world's iteration scope is open. Implement the guard.
+
+## 4. Transform propagation
+
+- [ ] 4.1 Test first (`SceneGraphUpdateTests`): world of the translation, scale, yaw, pitch and combined scenarios through the graph; root world equals local; invalid local rejected and previous kept (scale 0, NaN). Implement `SetLocal`, `Update` (single forward pass, BFS order) and world storage.
+- [ ] 4.2 Test first (`DirtyPropagationTests`): the 41-node ride-shaped tree: mill rotation recomputes 41, one hub's rotation recomputes 9, nothing recomputes 0; identical-value set is not dirty; orientation mode change marks dirty with descendants; reparent marks dirty. Implement dirty flags, `RecomputedCount` and the recomputed list.
+- [ ] 4.3 Test first (`PureFunctionTests`): alternate two states 10 000 times in the unit test (the spec's 1 000 000 is run once manually and noted in the doc) and compare bitwise to the first computation; two different construction sequences give bitwise-identical worlds. Fix any history dependence.
+- [ ] 4.4 Test first (`LevelOrderIndependenceTests`): `ComputeLevel(level, from, to)` over each level in reverse index order gives bitwise-equal worlds to `Update`. Implement `ComputeLevel` and make `Update` call it per level.
+- [ ] 4.5 Test first (`SceneGraphQueryTests`): `TryGetWorldTransform`, `TryGetWorldPosition` (pitched-arm fixture), `TryGetLocalTransform`, `TryGetParent`, `GetChildren` in sibling order, `TryFindByPath`, `TryGetPath`, unknown and destroyed ids return false, stale-until-update with `IsDirty`. Implement the query API (read-only, no mutation).
+- [ ] 4.6 Test first (`SceneGraphAllocationTests`): `Update` with 10 000 nodes after warm-up allocates zero bytes. Fix hidden allocations until green.
+
+## 5. Invariant tests (seeded random operations)
+
+- [ ] 5.1 Implement `SceneGraph/Support/RandomSceneSequence.cs`: seeded `Random`, weighted operations (create 35 %, destroy 10 %, reparent 20 %, rename 5 %, set-local 20 %, set-mode 10 %) with a naive reference tree kept in parallel. Test first: same seed, same operations.
+- [ ] 5.2 `SceneInvariantTests.Parent_index_is_smaller_than_child_index`: 200 seeds x 300 operations; after each `Update` assert `parentIndex[i] < i`, level starts partition the array, siblings in sequence order. Failure message prints the seed.
+- [ ] 5.3 `SceneInvariantTests.No_cycles_and_rejections_change_nothing`: every walk from a node to a root terminates within `MaxDepth + 1` steps; a structure fingerprint taken before every rejected operation equals the one after.
+- [ ] 5.4 `SceneInvariantTests.Ids_are_never_reused_and_survivors_are_stable`: collect issued ids across a run; no duplicates; ids of nodes that were never destroyed keep name, path and parent unless reparented.
+- [ ] 5.5 `SceneInvariantTests.World_transforms_match_naive_reference`: all random trees up to 300 nodes within 1e-9; includes `UprightYaw` nodes.
+- [ ] 5.6 `SceneInvariantTests.Construction_order_does_not_matter` (bitwise) and `.Level_order_does_not_matter` (bitwise).
+
+## 6. ECS integration
+
+- [ ] 6.1 Test first (`SceneComponentsTests`): the five components are unmanaged, registered with stable names (`sceneNode`, `sceneParent`, `sceneName`, `localTransform`, `worldTransform`), schema versions 1; `SceneName` round-trips ASCII names up to 31 characters and rejects longer; component registration helper `SceneComponents.Register(registry)` is idempotent per registry. Implement `SceneGraph/Components/*.cs` (with `[InlineArray]` for the name buffer) and the registration helper called by `AddSimulationModule()`.
+- [ ] 6.2 Test first (`SceneBuilderTests`): builder creates entities with all five components; `greatMill` id 1, `arm0` id 2 with `SceneParent` 1; fluent rig definition works (`Root(...).Child(...)`); immediate creation throws during an iteration scope. Implement `SceneGraph/SceneBuilder.cs`.
+- [ ] 6.3 Test first (`TransformSyncSystemTests`, using a real `World` and the sequential executor): local change reaches `WorldTransform` after one tick; ids assigned in ascending entity index order (entities 7, 3, 5 get ids in order 3, 5, 7); cycle in `SceneParent` reverted and counted; missing parent reverted; duplicate sibling name reverted; invalid local reverted. Implement `SceneGraph/Systems/TransformSyncSystem.cs` (name `scene.transform-sync`, declared access per spec).
+- [ ] 6.4 Test first (`SceneLifecycleTests`): destroying `arm0` through a command buffer destroys `hub0` in the same playback and removes both nodes; removing the observer and ticking still repairs the cache. Implement `IEntityLifecycleObserver` on the graph and registration in `AddSimulationModule()`.
+- [ ] 6.5 Test first (`SceneSchedulingTests`): the scheduler plan places `scene.transform-sync` after a registered system that writes `LocalTransform` and before a registered system that reads `WorldTransform` when registered in that order; a reader registered earlier is in an earlier stage (documented one-tick-old behaviour).
+- [ ] 6.6 Test first (`SceneRestoreTests`): world with 100 nodes saved with `WorldSerializer`, restored, `SceneGraph.Rebuild(world)`: worlds bitwise equal, hash equal, next node id identical; hash changes when parent, name, mode or local changes. Implement `Rebuild` (including restoring the id counter from the maximum `NodeId` plus a persisted counter component or option documented in the doc).
+- [ ] 6.7 `SceneInvariantTests.Rebuild_equals_live_graph`: 200 seeds, ECS-driven operations through the sync system; rebuilt graph equals live graph in order, locals and worlds.
+
+## 7. Diagnostics, features and endpoints
+
+- [ ] 7.1 Add DTOs under `Simulation.Abstractions/DataTransferObjects/GetSceneStructure/` (`SceneStructureResponse`, `SceneNodeDto`), `GetScenePose/` (`ScenePoseResponse`) and `GetSceneNode/` (`SceneNodeResponse`) as records with properties; use the `dto-organization` skill. Test: STJ serialisation produces camelCase and the exact shapes in `scene-pose-snapshot`.
+- [ ] 7.2 Test first (`SceneMetricsTests`, `MeterListener`): nodes gauge, update duration histogram, recomputed gauge, rejected counter with each `reason` tag value. Implement `Observability/SceneMetrics.cs` on `BoogaBoosterTelemetry.Meter`; guard timing by `Histogram.Enabled`.
+- [ ] 7.3 Test first (`GetSceneStructureHandlerTests`): mill/arm/hub structure, version bump on rename and not on transform change. Implement `Features/GetSceneStructure` (query + handler deriving from `QueryHandler<,>`, `ExecuteAsync`).
+- [ ] 7.4 Test first (`GetScenePoseHandlerTests`): shape (3 nodes give 3 ids and 24 numbers); local not world; upright hub ships rotation about Z of -30 degrees (effective local) and composing the three poses under `Inherit` gives an upright hub within 1e-12; non-finite value fails with the node id. Implement `Features/GetScenePose` using the between-ticks gate from `ecs-foundation`.
+- [ ] 7.5 Test first (`GetSceneNodeHandlerTests`): found with world position (0, 3, -5.196152422706632) within 1e-9; unknown id returns not found; implement `Features/GetSceneNode`.
+- [ ] 7.6 Test first (`SceneEndpointsTests`): `GET /simulation/scene/structure` 200; `/pose` 200; `/nodes/3` 200; `/nodes/99` 404; `/nodes/abc` 400. Add the three routes in `Endpoints/SimulationEndpoints.cs` with no business logic.
+
+## 8. Benchmarks
+
+- [ ] 8.1 Add scenarios S1 to S5 from design D11 to the existing benchmark project `Benchmarks/FourDotnet.BoogaBooster.Simulation.Benchmarks` (deterministic generated trees, 10 000 nodes, depth up to 5, fixed seed, allocation diagnostics). Verify: `dotnet run -c Release --project Benchmarks/FourDotnet.BoogaBooster.Simulation.Benchmarks -- --filter "*Scene*"` completes.
+- [ ] 8.2 Record CPU model, runtime version, mean and allocated bytes in `docs/simulation/02-scene-graph.md`. A result above 2x its budget stops the change with an open question in the PR description instead of ticking this task; between 1x and 2x is recorded with a one-line cause.
+
+## 9. Angular: scene snapshot reader and mirror
+
+- [ ] 9.1 Read `src/FourDotnet.BoogaBooster.App/.claude/CLAUDE.md` and check the pinned `three` version in `package.json`; record it in the doc and confirm `Object3D`, `Group`, `Quaternion` APIs used are not deprecated in that version. Create `src/FourDotnet.BoogaBooster.App/src/app/world/scene/scene-snapshot.models.ts` (readonly types: `SceneStructure`, `SceneNodeInfo`, `ScenePose`).
+- [ ] 9.2 Spec first (`scene-snapshot.reader.spec.ts`, Vitest): valid structure and pose parse; `transforms` length not `ids * 8` throws with `transforms` in the message; child listed before its parent throws naming `nodes[`; duplicate id, non-positive id, invalid name throw with the path. Implement `scene-snapshot.reader.ts` (`parseSceneStructure`, `parseScenePose`), plain TypeScript, no Angular imports.
+- [ ] 9.3 Spec first (`scene-mirror.spec.ts`): build from the mill/arm/hub structure; `findByPath("greatMill/arm0/hub0")` has `userData.nodeId === 3` and parent node 2; same structure version is a no-op; extra node keeps existing instances (`toBe`); remove and reparent scenario; rename updates `name` and path index. Implement `scene-mirror.ts` (`SceneMirror` class with `applyStructure`, `applyPose`, `getById`, `findByPath`, `root`).
+- [ ] 9.4 Spec first: `applyPose` sets local position, quaternion (x, y, z, w order) and uniform scale; stale structure version returns `stale-structure` and changes nothing; unknown ids skipped and counted; the pitched-arm fixture (mill yaw 90 degrees, arm pitch 30 degrees, hub effective rotation) after `root.updateMatrixWorld(true)` gives hub world position (0, 3, -5.196152) within 1e-5 and up axis (0, 1, 0) within 1e-6. Implement `applyPose`.
+- [ ] 9.5 Spec: seeded loop (200 seeds) generates random trees on the server-model side in the spec (a TypeScript reference composition of the same effective-local formula), applies structure and pose to the mirror and compares world positions within 1e-4; random single-field corruption always throws. Verify: `npx vitest run src/app/world/scene` is green.
+- [ ] 9.6 Confirm the Angular app still builds and all existing specs pass; `ride-visualization.ts` is unchanged (`git diff --stat` shows no edit there).
+
+## 10. Documentation and tooling
+
+- [ ] 10.1 Write `docs/simulation/02-scene-graph.md`: the coordinate convention, the hierarchy picture (BFS order, level starts), the compose formulas, the swing-twist derivation of `UprightYaw` with the rig proof from design D5, effective local rotation, the ECS component table, the sync system steps, "Why did my parent change not stick?", benchmark table, and a worked example building the Octopus rig skeleton (mill, 4 arms, 4 hubs, 16 hub arms, 16 gondolas) with the builder. Link from `docs/README.md`.
+- [ ] 10.2 Update the `Simulation` row of the Status table in `CLAUDE.md` (scene graph added) and mirror it in `.github/copilot-instructions.md`; run `node .claude/skills/ai-tooling-sync/scripts/sync-ai-tooling.mjs` and fix until it reports no errors.
+- [ ] 10.3 Coverage: run the `test-coverage` skill for `FourDotnet.BoogaBooster.Simulation`; line coverage at least 80 % overall; add tests for uncovered branches of `SceneGraph/`.
+
+## 11. Verify and hand over
+
+- [ ] 11.1 `dotnet build BoogaBooster.slnx` and `dotnet test BoogaBooster.slnx` are green (no new failures against the pre-existing baseline); `npm test` in the Angular app is green.
+- [ ] 11.2 Review the diff for leftover probes, unused usings, public fields, magic numbers and unused parameters; none remain. Confirm no file outside the listed paths changed, in particular nothing under `DigitalTwin/` or `ride-visualization.ts`.
+- [ ] 11.3 Commit as logical Conventional Commits (math, hierarchy, propagation, invariants, ECS integration, endpoints, benchmarks, Angular reader and mirror, docs).
+- [ ] 11.4 Push the branch and open a PR into `main` with `gh` (title `feat(simulation): scene graph`); the description lists design decisions D1 to D11, the benchmark table, the rig-axis assumption and open questions. Do not merge: merging is the user's decision.

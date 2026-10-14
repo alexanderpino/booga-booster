@@ -1,0 +1,99 @@
+Conventions for every task below: C# work starts by consulting the `4dotnet-csharp-style-guide` MCP server (`search_documents` for the topic of the task) and follows it; data members are properties, never public fields; every behaviour task is test-first (write the failing xUnit v3 test named after the rule, see it fail, implement, see it pass); no FluentAssertions; no magic numbers (constants in `Simulation/Ecs/SimulationParameters.cs`, rationale in `docs/simulation/01-ecs-foundation.md`). Backend paths are relative to `src/`, test project is `Tests/FourDotnet.BoogaBooster.Simulation.Tests` ("tests" below). Run `dotnet test Tests/FourDotnet.BoogaBooster.Simulation.Tests` from `src/` after every group.
+
+## 1. Preflight and scaffold
+
+- [ ] 1.1 Create the worktree and branch via the `git-change-workflow` skill (`feature/ecs-foundation` from `origin/main`); verify with `git branch --show-current`.
+- [ ] 1.2 Consult the `4dotnet-csharp-style-guide` MCP server (`search_documents`: `module`, `solution structure`, `testing`, `observability`) and record in `docs/simulation/01-ecs-foundation.md` (stub) the answers to design open questions: folder names `Ecs/` vs `Domain/`, and which engine types must live in `.Abstractions`. Verify: the stub lists both decisions with the guide document ids.
+- [ ] 1.3 Create projects `Simulation/FourDotnet.BoogaBooster.Simulation` (net10.0, Nullable, ImplicitUsings, `FrameworkReference Microsoft.AspNetCore.App`, refs to `.Abstractions` and `Shared/FourDotnet.BoogaBooster.Core`, `InternalsVisibleTo` the tests), `Simulation/FourDotnet.BoogaBooster.Simulation.Abstractions` and `Tests/FourDotnet.BoogaBooster.Simulation.Tests` (copy package set from `Tests/FourDotnet.BoogaBooster.Weather.Tests`: xunit.v3, Moq, Bogus, `Microsoft.Extensions.TimeProvider.Testing`). Verify: `dotnet build BoogaBooster.slnx` succeeds.
+- [ ] 1.4 Register the three projects in `BoogaBooster.slnx` (folders `/Simulation/` and the existing `/Tests/`) and add `Simulation` project reference plus `AddSimulationModule()` / `MapSimulationEndpoints()` calls to `FourDotnet.BoogaBooster.Api` (skeletons returning without behaviour). Verify: `dotnet build BoogaBooster.slnx` succeeds and `Program.cs` contains no endpoint mapping beyond the module call.
+- [ ] 1.5 Add `Simulation/Ecs/SimulationParameters.cs` with `FixedStepHz = 120`, `FixedStepSeconds = 1.0 / 120.0`, `MaxCatchUpSteps = 8`, `ChunkRows = 1024`, `MaxComponentTypes = 256`, `DefaultMaxEntities = 1_048_576`, `InitialArchetypeCapacity = 256`; each with an XML-doc line stating its rationale. Test first: `SimulationParametersTests.FixedStepSeconds_is_exactly_one_over_hz` (equality against `1.0 / 120.0`). Verify: test green.
+
+## 2. Entity ids and component registry
+
+- [ ] 2.1 Test first (`EntityIdTests`): default id is not alive, equality/ordering by (index, generation), `ToString` is `E{index}v{generation}`. Implement `Ecs/EntityId.cs` as `readonly record struct EntityId(int Index, int Generation)` with `IsNull`.
+- [ ] 2.2 Test first (`EntityAllocatorTests`): sequential indices 0,1,2 with generation 1; destroy bumps generation; LIFO reuse (2,1,0 scenario); retired slot at `int.MaxValue` is never reused (use an internal test hook to preset the generation); capacity exceeded throws `WorldCapacityExceededException` and leaves state unchanged. Implement `Ecs/EntityAllocator.cs` (slot table `{Generation, ArchetypeId, Row}`, free stack, `MaxEntities`).
+- [ ] 2.3 Test first (`ComponentRegistryTests`): ids follow registration order; duplicate name and duplicate type rejected; invalid name (`Pos`, `1x`, empty) rejected; 257th type rejected; registration after `Freeze()` throws; tag registration occupies an id but reports `Size == 0`. Implement `Ecs/ComponentRegistry.cs`, `ComponentTypeId`, `ComponentInfo` (name, schema version, size, CLR type, optional `ReplicationSchema`) with `Register<T>(...) where T : unmanaged` and `RegisterTag(...)`.
+- [ ] 2.4 Test first (`ReplicationSchemaTests`): fields are ordered, names unique and non-empty, accessor count equals name count. Implement `Ecs/ReplicationSchema.cs` (names + `Func<T,double>` accessors, built through `ReplicationSchema.For<T>().Field("x", c => c.X)...`).
+
+## 3. Archetype storage and component operations
+
+- [ ] 3.1 Test first (`ArchetypeTests`): an archetype key is the sorted component id set; the same set always yields the same archetype; archetypes are numbered in creation order; adding a row appends to every column and to the entity array; swap-remove moves the last row into the hole and returns the moved entity for location fix-up. Implement `Ecs/Storage/Archetype.cs`, `Column.cs` (`Column<T>` over `T[]`, doubling growth, raw-byte copy/move helpers for the type-erased path) and `ArchetypeKey`.
+- [ ] 3.2 Test first (`WorldEntityTests`): create/destroy/`IsAlive`; `Get<T>` by ref on live entity; stale handle throws `StaleEntityException`; `Has<T>`; entity count. Implement `Ecs/World.cs` (constructor takes a frozen registry and `SimulationOptions`; exposes `EntityCount`, `ArchetypeCount`, `Tick`, `ArchetypeVersion`).
+- [ ] 3.3 Test first (`WorldComponentTests`): add preserves other components; add of an existing component overwrites; remove of a missing component is a no-op; remove then re-add works; swap-remove keeps other entities readable; tag add/remove moves archetype without data. Implement `Add<T>`, `Set<T>`, `Remove<T>`, `AddTag`, `RemoveTag` as archetype moves.
+- [ ] 3.4 Test first (`IterationScopeTests`): create/destroy/add/remove throw `InvalidOperationException` while `world.BeginIteration()` scope is open; `Set` and `Get` still work; disposing the scope re-enables; nested open throws. Implement `World.BeginIteration()` returning a disposable `IterationScope`.
+
+## 4. Command buffer and lifecycle observers
+
+- [ ] 4.1 Test first (`EntityCommandBufferTests`): create returns a provisional id (generation 0); `Add<T>` on the provisional id works after playback; destroy; set; remove; payload round-trips for a 56-byte component; buffer reuse after `Clear()` allocates nothing in steady state (allocated-bytes assertion). Implement `Ecs/Commands/EntityCommandBuffer.cs` (op list + byte arena).
+- [ ] 4.2 Test first (`CommandPlaybackTests`): deterministic order by (system index, sequence) irrespective of recording order; stale targets are discarded and counted (the "two destroys + one set = 2 discarded" scenario); a command referencing a provisional id of another buffer is discarded. Implement `Ecs/Commands/CommandPlayback.cs` taking buffers with their system order index.
+- [ ] 4.3 Test first (`LifecycleObserverTests`): observers called in registration order on create and just before destroy; an observer that records a destroy of a child during parent destroy causes both to be gone after one playback; cascade depth of 1000 terminates. Implement `IEntityLifecycleObserver` and the playback loop that drains observer-recorded commands.
+
+## 5. Queries
+
+- [ ] 5.1 Test first (`QueryMatchingTests`): required, `With`, `Without` selection (10/5 scenario), tag filters, empty world yields zero chunks, query re-matches when `ArchetypeVersion` changes. Implement `Ecs/Queries/QueryDescription.cs` and `Query.cs` with cached archetype list.
+- [ ] 5.2 Test first (`ChunkIterationTests`): 2 500 rows give chunks of 1 024/1 024/452; spans alias storage (write visible by handle read); `Entities` span matches component spans row for row. Implement `Chunk` (ref struct) and `ChunkEnumerator`.
+- [ ] 5.3 Test first (`IterationOrderTests`): creation order; swap-remove order (E2, E1 scenario); archetype creation order scenario; documented non-stability after add/remove. Verify via the existing implementation; fix the storage if red.
+- [ ] 5.4 Test first (`QueryIndexAccessTests`): `ChunkCount`/`GetChunk(i)` visit the same entities in the same order as enumeration. Implement the indexable form.
+- [ ] 5.5 Test first (`QueryAllocationTests.Iterating_100k_entities_allocates_zero_bytes`): warm-up pass, then assert `GC.GetAllocatedBytesForCurrentThread()` equal before/after the measured pass. Fix any hidden allocation (boxing, closures, enumerators) until green. This is the machine-independent guard required by `ecs-performance-budget`.
+
+## 6. Systems and scheduler
+
+- [ ] 6.1 Test first (`SystemAccessTests`): undeclared component request and write-to-read-declared throw with the system and component names. Implement `Ecs/Systems/ISimulationSystem.cs`, `SystemAccess`, `SystemContext` and the validated query factory (validation toggled by `SimulationOptions.ValidateAccess`, default true in Debug/tests).
+- [ ] 6.2 Test first (`SchedulerPlanTests`): read-read share a stage; writer-before-reader by registration order; explicit `UpdateBefore`; cycle error names both systems; duplicate system name rejected; ties broken by registration order; plan is identical across 100 repeated builds. Implement `Ecs/Systems/SystemScheduler.cs` and `ExecutionPlan` (Kahn with stable tie-break; stages).
+- [ ] 6.3 Test first (`SequentialExecutorTests`): systems run in plan order; iteration scope is open during `Update` and closed after; command buffers played back once after the last system; exception closes the scope, discards buffers and propagates. Implement `ISystemExecutor` and `SequentialSystemExecutor`.
+- [ ] 6.4 Test first (`SystemRegistrationTests`): `AddSimulationSystem<T>()` collects systems in registration order into the scheduler. Implement DI extension in `SimulationModuleExtensions.cs` plus `SimulationModuleOptions` (`SectionName = "Simulation"`, `Enabled=false`, `MaxEntities`, `MaxCatchUpSteps`, `ValidateAccess`).
+
+## 7. Fixed tick driver and hosting
+
+- [ ] 7.1 Test first (`FixedTickDriverTests`, using `FakeTimeProvider`): 1 s gives 120 ticks; 8 ms gives 0; 25 ms gives 3; 1 000 irregular increments summing to 600 s give exactly 72 000 ticks; the catch-up cap scenario (8 run, 112 dropped, next step exact); stop/start does not burst and keeps the counter; `Tick/120.0` simulation time. Implement `Ecs/Time/FixedTickDriver.cs` with the integer algorithm from design D8 (`Int128` intermediate).
+- [ ] 7.2 Test first (`SimulationBackgroundServiceTests`): disabled option runs nothing; enabled option with `FakeTimeProvider` advances ticks; cancellation exits within one period. Implement `Application/SimulationBackgroundService.cs` using `TimeProvider.CreateTimer` and `PeriodicTimer`-equivalent logic that is fake-clock friendly; register only when `Enabled`.
+- [ ] 7.3 Test first (`TickGateTests`): a snapshot request issued mid-tick waits until the tick ends and sees the post-tick state. Implement the between-ticks gate (`SimulationRuntime` with a lock) used by the driver and by the snapshot handler.
+
+## 8. State hash, save/restore, JSON projection
+
+- [ ] 8.1 Test first (`WorldHashTests`): equal worlds equal hash; layout independence (two build sequences with different row order); one-ulp difference changes the hash; tick participates. Implement `Ecs/Snapshots/WorldHasher.cs` (FNV-1a 64, canonical order per spec).
+- [ ] 8.2 Test first (`WorldSerializerTests`): round trip of 1 000 entities x 3 types (hash, count, tick equal); same ids after restore; continue 600 ticks identical (hash compared every 60 ticks, using a deterministic test system); corrupt magic, truncated stream and schema-version mismatch fail with `SnapshotFormatException` and return no world. Implement `Ecs/Snapshots/WorldSerializer.cs` (`Save(World, Stream)`, `Restore(registry, Stream)`; validate before building; little-endian explicit).
+- [ ] 8.3 Test first (`WorldSnapshotProjectionTests`): shape per spec; non-replicated component hidden; entities without replicated components omitted; ascending index order; NaN and Infinity throw naming component and entity. Implement `Ecs/Snapshots/WorldSnapshotProjector.cs` returning `WorldSnapshotResponse`.
+- [ ] 8.4 Add DTOs in `Simulation.Abstractions/DataTransferObjects/GetWorldSnapshot/` (`WorldSnapshotResponse`, `WorldSnapshotEntityDto`) and `.../GetSimulationDiagnostics/SimulationDiagnosticsResponse` as records with properties; JSON casing camelCase. Test: STJ serialisation test asserts the exact JSON shape of the spec example. Use the `dto-organization` skill.
+
+## 9. Diagnostics, features and endpoints
+
+- [ ] 9.1 Test first (`SimulationMetricsTests` with a `MeterListener`, pattern as in `Weather.Tests/TelemetryRecorder.cs`): 10 ticks with two systems give `boogabooster.sim.ticks` +10, tick duration 10 values, system duration 20 values tagged `system`; gauges follow entity/archetype counts; discarded and dropped counters; no timestamps taken when no listener (guarded by `Histogram.Enabled`). Implement `Observability/SimulationMetrics.cs` on `BoogaBoosterTelemetry.Meter`.
+- [ ] 9.2 Test first (`GetSimulationDiagnosticsHandlerTests`): fresh host values (tick 0, entity 0, empty system list); after 3 ticks returns tick 3 and system names in plan order. Implement `Features/GetSimulationDiagnostics/GetSimulationDiagnosticsQuery.cs` + handler deriving from `QueryHandler<,>` with `ExecuteAsync`.
+- [ ] 9.3 Test first (`GetWorldSnapshotHandlerTests`): returns projection of the last completed tick; wraps projection errors so the endpoint answers 500 problem details; starts one `simulation.snapshot` activity tagged `tick`. Implement `Features/GetWorldSnapshot/` query + handler.
+- [ ] 9.4 Test first (`SimulationEndpointsTests`, `WebApplicationFactory`-free: build a minimal host with `MapSimulationEndpoints()` as other module tests do): `GET /simulation/diagnostics` 200 on a fresh host; `GET /simulation/snapshot` 200 with `schemaVersion` 1. Implement `Endpoints/SimulationEndpoints.cs` with `MapSimulationEndpoints()` containing no business logic; remove the skeleton from task 1.4.
+- [ ] 9.5 Verify telemetry wiring: run `dotnet test`, then confirm `FourDotnet.BoogaBooster.Aspire.ServiceDefaults` already adds the `FourDotnet.BoogaBooster` meter (no change expected; if a change is needed, make it there and nowhere else).
+
+## 10. Invariant tests (seeded random operations)
+
+- [ ] 10.1 Implement `Tests/.../Support/RandomOperationSequence.cs`: seeded `Random`, weighted operations (create 30 %, destroy 20 %, add 20 %, remove 15 %, set 15 %) over 3 data components and 1 tag; also records a reference model (`Dictionary<EntityId, ComponentValues>`). Test first for the harness itself: same seed gives the same operation list.
+- [ ] 10.2 `WorldInvariantTests.Random_sequences_keep_every_invariant`: 200 seeds x 500 operations; after every operation (full check every 25th) assert: live ids resolve and stale ids do not; entity count equals live slots; free list and live slots are disjoint; each archetype row points back to a slot whose `Row` matches; component values equal the reference model. Failure message includes the seed.
+- [ ] 10.3 `WorldInvariantTests.No_id_is_ever_issued_twice`: across 200 seeds, collect every issued `EntityId`; assert no duplicates, including after destroy/create cycles (stable ids after destroy/create).
+- [ ] 10.4 `WorldInvariantTests.Same_seed_same_hash` and `.Restore_equals_original_for_random_worlds`: 200 seeds; run twice and compare hashes; save/restore and compare hash and next-issued ids.
+- [ ] 10.5 `SchedulerInvariantTests.Plans_respect_every_dependency`: 200 seeds of random system sets (access sets over 6 components, random explicit constraints that are acyclic by construction); assert every edge is respected, stages contain no conflicting pair, and the plan is a permutation of the input. A seeded set with an injected cycle must fail with both names.
+- [ ] 10.6 `DriverInvariantTests.Tick_count_equals_floor_of_elapsed`: 200 seeds of random time increments (1 ns to 200 ms) with the cap disabled via option; assert `ticks == floor(totalElapsed * 120 / frequency)` after every `Advance()`.
+
+## 11. Benchmarks
+
+- [ ] 11.1 Run the currency check for `BenchmarkDotNet` (not deprecated in the pinned .NET 10 SDK, official docs name no different default for micro-benchmarks, upstream not archived and released within 12 months) and record result and chosen version in the doc; if it fails, choose a documented alternative and record why. Create `Benchmarks/FourDotnet.BoogaBooster.Simulation.Benchmarks` (console, Release only, not in the test run, in `BoogaBooster.slnx` under `/Benchmarks/`).
+- [ ] 11.2 Implement benchmarks B1 to B6 exactly as defined in spec `ecs-performance-budget` (parameterised N, `MemoryDiagnoser`, a shared `BenchmarkWorldFactory` building the world deterministically with a fixed seed). Verify: `dotnet run -c Release --project Benchmarks/FourDotnet.BoogaBooster.Simulation.Benchmarks -- --filter "*"` completes.
+- [ ] 11.3 Record results (CPU model, core count, runtime version, mean, allocated) in `docs/simulation/01-ecs-foundation.md`. If any result is above 2x its budget, stop and write the open question into the PR description instead of ticking this task; if between 1x and 2x, record it with a one-line cause. Verify: the table exists and B1/B2 show 0 B/op.
+
+## 12. Angular: thin typed snapshot reader
+
+- [ ] 12.1 Consult the `primeng` MCP server only if UI is added (none planned) and read `src/FourDotnet.BoogaBooster.App/.claude/CLAUDE.md` for frontend conventions. Create `src/FourDotnet.BoogaBooster.App/src/app/world/snapshot/world-snapshot.models.ts` with the `WorldSnapshot`, `WorldSnapshotEntity` and `ComponentSchema` types (readonly, no `any`).
+- [ ] 12.2 Spec first (`world-snapshot.reader.spec.ts`, Vitest): valid payload parses and `readComponent(snapshot, entity, "position")` returns `{ x: 1.5, y: 2, z: -3 }`; length mismatch error contains `entities[0].values.position`; `schemaVersion` 99 throws an unsupported-version error; non-number value, missing `schema`, negative index and non-finite number each throw with their path. Implement `world-snapshot.reader.ts` (`parseWorldSnapshot(raw: unknown)` and `readComponent`).
+- [ ] 12.3 Spec: a seeded loop (200 seeds) generates random valid payloads, serialises with `JSON.stringify`, parses, and asserts the round trip is lossless; random single-field corruption always throws. Verify: `npx vitest run src/app/world/snapshot` is green. Confirm no Angular imports exist in the folder (plain TypeScript).
+
+## 13. Documentation and tooling
+
+- [ ] 13.1 Write `docs/simulation/01-ecs-foundation.md`: the picture of archetype SoA, id/generation, command buffer flow, tick algorithm with the integer formula, determinism rules (what is guaranteed, what is not), the benchmark table, how to add a component and a system (worked example with `Position`/`Velocity`), and a glossary. Link from `docs/README.md`.
+- [ ] 13.2 Add a `Simulation` row to the Status table in `CLAUDE.md` and mirror it in `.github/copilot-instructions.md`; run `node .claude/skills/ai-tooling-sync/scripts/sync-ai-tooling.mjs` and fix until it reports no errors.
+- [ ] 13.3 Coverage: run the `test-coverage` skill for `FourDotnet.BoogaBooster.Simulation`; line coverage must be at least 80 %; add tests for uncovered branches until it is.
+
+## 14. Verify and hand over
+
+- [ ] 14.1 `dotnet build BoogaBooster.slnx` and `dotnet test BoogaBooster.slnx` are green (no new failures against the pre-existing baseline); `npm test` in the Angular app is green.
+- [ ] 14.2 Review the diff for leftover probes, unused usings, public fields, magic numbers and unused parameters; none remain.
+- [ ] 14.3 Commit as logical Conventional Commits (scaffold, ids and registry, storage, command buffer, queries, scheduler, tick driver, snapshot, diagnostics, benchmarks, Angular reader, docs), one per task group where practical.
+- [ ] 14.4 Push the branch and open a PR into `main` with `gh` (title `feat(simulation): ECS foundation`); the description lists design decisions D1 to D13, the benchmark table and open questions. Do not merge: merging is the user's decision.
